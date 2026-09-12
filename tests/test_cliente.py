@@ -1,9 +1,9 @@
 """tests/test_cliente.py — Pruebas del cliente unificado.
 
 APUNTE: para probar sin gastar tokens (y sin necesitar una API key real) reemplazo el
-cliente del SDK por un doble ("fake"). Así puedo verificar el comportamiento del
-CÓDIGO PROPIO: que el streaming respete el orden, que los errores se envuelvan en
-LLMError y que las validaciones de Pydantic salten cuando tienen que saltar.
+cliente interno del SDK por un doble ("fake"). Así verifico el comportamiento del
+CÓDIGO PROPIO: que el streaming respete el orden, que los errores viajen dentro del
+ModelResponse (sin crash) y que las validaciones de Pydantic salten cuando corresponde.
 
 Correr:  pytest -q
 """
@@ -11,22 +11,21 @@ Correr:  pytest -q
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
-from clients import BaseLLMClient, LLMError, OpenAIClient
-from manager import AsyncLLMManager
-from schemas import ChatMessage, ModelConfig, Role
+from clients import BaseLLMClient, GeminiClient, OpenAIClient
+from manager import AsyncLLMManager, config_desde_entorno
+from schemas import ChatMessage, LLMConfig, ModelConfig, Provider, Role
 
 
 # --------------------------------------------------------------------------
-# Dobles de prueba (fakes)
+# Dobles de prueba
 # --------------------------------------------------------------------------
-def _chunk(text: str | None):
-    """Arma un chunk con la misma forma que devuelve el SDK de OpenAI."""
-
+def _chunk(text):
     return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
 
 
@@ -43,39 +42,46 @@ class _AsyncIter:
 
 
 class FakeCompletions:
-    """Imita client.chat.completions, pero devuelve datos fijos."""
-
-    def __init__(self, *, fail: bool = False, tokens=("Hola", ", ", "mundo")):
+    def __init__(self, *, fail: Exception | None = None, tokens=("Hola", ", ", "mundo")):
         self.fail = fail
         self.tokens = tokens
 
     async def create(self, **kwargs):
         if self.fail:
-            raise RuntimeError("429 Too Many Requests (simulado)")
+            raise self.fail
         if kwargs.get("stream"):
-            # incluyo un chunk vacío a propósito: el SDK real los manda y hay que saltarlos
+            # incluyo un chunk vacío a propósito: el SDK real los manda
             return _AsyncIter([_chunk(None), *[_chunk(t) for t in self.tokens], _chunk("")])
         return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content="respuesta simulada"),
-                    finish_reason="stop",
-                )
-            ]
+            choices=[SimpleNamespace(message=SimpleNamespace(content="respuesta simulada"))]
         )
 
 
-def make_client(fail: bool = False) -> OpenAIClient:
-    client = OpenAIClient(api_key="test-key", model="gpt-4o-mini")
-    client.client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions(fail=fail)))
+def make_client(fail=None) -> OpenAIClient:
+    client = OpenAIClient(api_key="test-key", model="gpt-4o-mini", temperature=0.7, max_tokens=100)
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions(fail=fail)))
     return client
 
 
 MSG = [ChatMessage(role=Role.USER, content="¿Qué es la entropía?")]
 
 
+def _config(provider=Provider.OPENAI, **kwargs) -> LLMConfig:
+    campos = {
+        "provider": provider,
+        "model": "gpt-4o-mini",
+        "temperature": 0.7,
+        "max_tokens": 100,
+        "openai_api_key": SecretStr("test-key"),
+        "anthropic_api_key": SecretStr("test-key"),
+        "google_api_key": SecretStr("test-key"),
+    }
+    campos.update(kwargs)
+    return LLMConfig(**campos)
+
+
 # --------------------------------------------------------------------------
-# 1. Validación Pydantic (criterio "Validación" de la rúbrica)
+# 1. Validación Pydantic
 # --------------------------------------------------------------------------
 def test_temperatura_fuera_de_rango_falla():
     with pytest.raises(ValidationError):
@@ -96,68 +102,115 @@ def test_contenido_vacio_falla():
         ChatMessage(role=Role.USER, content="")
 
 
+def test_secretstr_oculta_la_key():
+    cfg = _config()
+    assert "test-key" not in repr(cfg)  # SecretStr NO expone el valor
+
+
 # --------------------------------------------------------------------------
-# 2. Abstracción (criterio "Abstracción y gestión de proveedores")
+# 2. Abstracción y factory
 # --------------------------------------------------------------------------
 def test_la_base_es_abstracta():
     with pytest.raises(TypeError):
-        BaseLLMClient(api_key="x", model="y")  # type: ignore[abstract]
+        BaseLLMClient(model="x", temperature=0.5, max_tokens=10)  # type: ignore[abstract]
 
 
-def test_manager_elige_proveedor_por_entorno(monkeypatch):
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    manager = AsyncLLMManager(api_key="test-key")
-    assert manager.provider == "anthropic"
+@pytest.mark.parametrize(
+    "provider",
+    [Provider.OPENAI, Provider.ANTHROPIC, Provider.GEMINI],
+)
+def test_manager_construye_los_tres_proveedores(provider):
+    manager = AsyncLLMManager(_config(provider))
+    assert manager._client.provider == provider
 
 
-def test_manager_falla_sin_api_key(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+def test_manager_falla_si_falta_la_key():
     with pytest.raises(ValueError):
-        AsyncLLMManager(provider="openai")
+        AsyncLLMManager(LLMConfig(provider=Provider.OPENAI, model="gpt-4o-mini"))
+
+
+def test_config_desde_entorno(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    cfg = config_desde_entorno()
+    assert cfg.provider is Provider.GEMINI
+    assert cfg.model == "gemini-flash-latest"
 
 
 # --------------------------------------------------------------------------
-# 3. Streaming asíncrono (criterio "Streaming asíncrono")
+# 3. Streaming asíncrono
 # --------------------------------------------------------------------------
 def test_generate_devuelve_respuesta():
-    client = make_client()
-    response = asyncio.run(client.generate(MSG))
+    response = asyncio.run(make_client().generate(MSG))
     assert response.content == "respuesta simulada"
-    assert response.provider == "openai"
+    assert response.provider is Provider.OPENAI
+    assert response.error is None
 
 
 def test_stream_entrega_tokens_en_orden():
-    client = make_client()
-
     async def run():
-        return [token async for token in client.stream(MSG)]
+        return [t async for t in make_client().generate_stream(MSG)]
 
     assert asyncio.run(run()) == ["Hola", ", ", "mundo"]
 
 
 def test_stream_salta_chunks_vacios():
-    client = make_client()
-
     async def run():
-        return [t async for t in client.stream(MSG)]
+        return [t async for t in make_client().generate_stream(MSG)]
 
     tokens = asyncio.run(run())
     assert "" not in tokens and None not in tokens
 
 
+def test_manager_delega_el_streaming(monkeypatch):
+    manager = AsyncLLMManager(_config())
+    manager._client = make_client()
+
+    async def run():
+        return [t async for t in manager.generate_stream(MSG)]
+
+    assert asyncio.run(run()) == ["Hola", ", ", "mundo"]
+
+
 # --------------------------------------------------------------------------
-# 4. Resiliencia (criterio "Resiliencia": error controlado, no crash)
+# 4. Resiliencia: el error viaja en el ModelResponse, nunca hay crash
 # --------------------------------------------------------------------------
-def test_error_de_red_se_envuelve_en_llm_error():
-    client = make_client(fail=True)
-    with pytest.raises(LLMError):
-        asyncio.run(client.generate(MSG))
+def test_error_de_api_no_crashea():
+    import openai
+
+    class FakeRespuesta:
+        status_code = 401
+        request = None
+        headers = {}
+
+    error = openai.APIError("incorrect api key", FakeRespuesta(), body=None)
+    resultado = asyncio.run(make_client(fail=error).generate(MSG))
+
+    assert isinstance(resultado, object)
+    assert resultado.error is not None
+    assert "Error de la API de OpenAI" in resultado.error
+    assert resultado.content == ""
 
 
-def test_safe_generate_no_propaga_el_error():
-    manager = AsyncLLMManager(provider="openai", api_key="test-key")
-    manager._client = make_client(fail=True)
+def test_error_en_streaming_avisa_dentro_del_stream():
+    import openai
 
-    provider, text = asyncio.run(manager.safe_generate(MSG))
-    assert provider == "openai"
-    assert text.startswith("[error controlado]")
+    class FakeRespuesta:
+        status_code = 429
+        request = None
+        headers = {}
+
+    error = openai.APIError("rate limited", FakeRespuesta(), body=None)
+
+    async def run():
+        return [t async for t in make_client(fail=error).generate_stream(MSG)]
+
+    texto = "".join(asyncio.run(run()))
+    assert "Error durante el streaming" in texto
+
+
+def test_gemini_client_existe():
+    # El tercer proveedor que agrega la pista de la clase.
+    cliente = GeminiClient(api_key="test-key", model="gemini-flash-latest",
+                           temperature=0.7, max_tokens=100)
+    assert cliente.provider is Provider.GEMINI
