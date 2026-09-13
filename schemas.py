@@ -22,7 +22,7 @@ class Provider(str, Enum):
     """Proveedores soportados.
 
     Heredo de str para que el valor se serialice directo a JSON.
-    (Dejo Gemini porque la pista de la clase lo incluye y tiene free tier sin tarjeta.)
+    (Sumo Gemini además de OpenAI y Anthropic: tiene free tier y no pide tarjeta.)
     """
 
     OPENAI = "openai"

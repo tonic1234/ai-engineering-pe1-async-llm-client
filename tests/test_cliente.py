@@ -210,7 +210,7 @@ def test_error_en_streaming_avisa_dentro_del_stream():
 
 
 def test_gemini_client_existe():
-    # El tercer proveedor que agrega la pista de la clase.
+    # El tercer proveedor soportado.
     cliente = GeminiClient(api_key="test-key", model="gemini-flash-latest",
                            temperature=0.7, max_tokens=100)
     assert cliente.provider is Provider.GEMINI
