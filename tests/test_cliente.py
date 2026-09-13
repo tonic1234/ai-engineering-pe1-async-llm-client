@@ -1,6 +1,6 @@
 """tests/test_cliente.py — Pruebas del cliente unificado.
 
-APUNTE: para probar sin gastar tokens (y sin necesitar una API key real) reemplazo el
+Ojo: para probar sin gastar tokens (y sin necesitar una API key real) reemplazo el
 cliente interno del SDK por un doble ("fake"). Así verifico el comportamiento del
 CÓDIGO PROPIO: que el streaming respete el orden, que los errores viajen dentro del
 ModelResponse (sin crash) y que las validaciones de Pydantic salten cuando corresponde.

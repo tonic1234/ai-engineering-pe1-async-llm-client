@@ -1,6 +1,6 @@
 """manager.py — Factory que construye el cliente según la configuración.
 
-APUNTE DE CLASE:
+NOTA:
 Este es el patrón Factory que vimos: el manager mira `config.provider` y arma el
 cliente que corresponde. La lógica de negocio pide el manager y listo; nunca importa
 openai, anthropic ni google directamente.

@@ -4,7 +4,7 @@ Pre-entrega 1 del curso **AI Engineering** (Coderhouse).
 Implementa un cliente que permite intercambiar entre **OpenAI**, **Anthropic** y **Gemini**
 con la misma interfaz, todo asíncrono y con soporte de *streaming* de tokens.
 
-## Qué hay adentro
+## Archivos del proyecto
 
 | Archivo | Qué hace |
 |---|---|
@@ -79,7 +79,7 @@ Error capturado (sin crash): Error de la API de OpenAI: Error code: 401 - Incorr
   `ModelResponse` (campo `error`), o como un aviso dentro del stream. Una key inválida o un
   429 no tumban el programa (es la "fuga de excepciones" que menciona la consigna).
 
-## Tests
+## Cómo correr los tests
 
 ```bash
 pytest -q
